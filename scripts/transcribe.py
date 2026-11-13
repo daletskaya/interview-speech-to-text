@@ -84,17 +84,28 @@ def find_glossary(audio):
 
 
 def load_glossary(path):
+    """Читает словарь: только то, что лежит внутри блоков ```.
+
+    Всё остальное в файле — пояснения для человека, и читать их как
+    термины нельзя: иначе в подсказку модели уедут целые предложения,
+    и она начнёт слышать их в речи.
+    """
     terms, swaps = [], []
     if not path or not os.path.exists(path):
         return terms, swaps
-    section = None
+    section, inside = None, False
     for line in open(path, encoding="utf-8"):
-        line = line.strip()
+        line = line.rstrip()
+        if line.strip().startswith("```"):
+            inside = not inside
+            continue
         if line.startswith("#"):
             low = line.lower()
             section = "terms" if "термин" in low else "swaps" if "замен" in low else None
+            inside = False
             continue
-        if not line or section is None:
+        line = line.strip()
+        if not line or not inside or section is None:
             continue
         if section == "terms":
             terms.append(line)
