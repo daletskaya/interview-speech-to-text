@@ -193,7 +193,7 @@ def main():
 
     model_path = args.model or find_model()
     if not model_path or not os.path.exists(model_path):
-        sys.exit("не нашла модель распознавания.\n"
+        sys.exit("модель распознавания не найдена.\n"
                  "Скачай Systran/faster-whisper-large-v3 или укажи папку "
                  "через --model. Если загрузка виснет — см. references/okruzhenie.md.")
 
