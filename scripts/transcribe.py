@@ -23,6 +23,7 @@ import argparse
 import glob
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -64,6 +65,22 @@ JUNK = ["продолжение следует", "субтитры", "спаси
         "подписывайтесь", "редактор субтитров", "фонд кино"]
 
 TEMPS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+
+def find_glossary(audio):
+    """Ищет словарь: сначала рядом с записью, потом в самом скилле.
+
+    Так у каждого проекта может быть свой словарь, и его не нужно каждый
+    раз передавать руками — достаточно положить файл к записям.
+    """
+    here = pathlib.Path(audio).resolve().parent
+    skill = pathlib.Path(__file__).resolve().parent.parent
+    for folder in (here, skill):
+        for name in ("глоссарий.md", "glossary.md"):
+            candidate = folder / name
+            if candidate.exists():
+                return str(candidate)
+    return None
 
 
 def load_glossary(path):
@@ -158,7 +175,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("audio")
     ap.add_argument("out")
-    ap.add_argument("--glossary")
+    ap.add_argument("--glossary",
+                    help="по умолчанию ищется рядом с записью, потом в скилле")
     ap.add_argument("--model", help="папка с моделью; по умолчанию ищется сама")
     args = ap.parse_args()
 
@@ -170,7 +188,10 @@ def main():
 
     from faster_whisper import WhisperModel
 
-    terms, swaps = load_glossary(args.glossary)
+    glossary = args.glossary or find_glossary(args.audio)
+    if glossary:
+        print(f"словарь: {glossary}", flush=True)
+    terms, swaps = load_glossary(glossary)
     prompt = ("Разговор о приложении. Термины: " + ", ".join(terms) + ".") if terms else None
     if prompt:
         print(f"подсказка модели: {prompt}", flush=True)
