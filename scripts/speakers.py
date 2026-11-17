@@ -223,16 +223,22 @@ def detect(path, out, args):
     # Одна и та же плитка от кадра к кадру стоит на том же месте, но при смене
     # раскладки (включили демонстрацию экрана) уезжает. Поэтому кластеров может
     # быть больше, чем людей: один человек — несколько позиций.
-    seen = {}
-    for _, _, tiles in rows:
+    seen, alone = {}, {}
+    for t, _, tiles in rows:
         for a, b in tiles:
             key = next((k for k in seen if abs(k[0] - a) <= 12 and abs(k[1] - b) <= 12), None)
-            seen[key or (a, b)] = seen.get(key or (a, b), 0) + 1
+            key = key or (a, b)
+            seen[key] = seen.get(key, 0) + 1
+            if len(tiles) == 1:
+                alone.setdefault(key, t)
     places = sorted(seen.items(), key=lambda kv: kv[0][0])
 
     print("найденные плитки:")
     for i, ((a, b), n) in enumerate(places):
-        print(f"  {i}: x {a}-{b}  подсвечена {n / args.fps:.0f} с")
+        when = f"одна в кадре на {alone[(a, b)]:.0f}-й секунде" if (a, b) in alone else "одна не встречается"
+        print(f"  {i}: x {a}-{b}  подсвечена {n / args.fps:.0f} с  ({when})")
+    print("\nКто есть кто, по номерам не угадать: вырежи кадр на указанной секунде")
+    print("и прочитай подпись под подсвеченной плиткой.")
     print("\nЕсли плиток больше, чем участников, значит, раскладка менялась:")
     print("один человек даёт несколько позиций. Сопоставь их с именами по кадру")
     print("и передай build.py, например: --names \"0=Интервьюер,2=Интервьюер,1=Гость\".")

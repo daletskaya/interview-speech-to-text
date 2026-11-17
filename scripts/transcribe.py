@@ -1,7 +1,14 @@
 #!/usr/bin/env python
 """Распознаёт речь и сам чинит места, где модель сорвалась.
 
-    transcribe.py АУДИО.wav ВЫХОД.json [--glossary ПУТЬ] [--model ПУТЬ]
+    transcribe.py АУДИО.wav ВЫХОД.json [--engine auto|mlx|faster]
+                                       [--glossary ПУТЬ] [--model ПУТЬ]
+
+Движков два, модель одна и та же — Whisper:
+  mlx     считает на видеоядрах маков с процессором Apple. Полчаса записи —
+          полторы-две минуты. Выбирается сам, если установлен mlx-whisper.
+  faster  считает на процессоре, работает везде. Полчаса записи — около
+          сорока минут.
 
 Делает три прохода:
   1. основной — по всему файлу;
@@ -17,20 +24,24 @@
 раз сбившись, модель тянет сбой дальше. На коротком куске без оглядки
 тот же участок распознаётся нормально.
 
-Выход: JSON со списком segments (start, end, text, words).
+Тайм-коды отдельных слов не считаются: сборке диалога хватает сегментов,
+а слова стоят трети времени.
+
+Выход: JSON со списком segments (start, end, text, words). Список words
+пустой и оставлен для совместимости.
 """
 import argparse
 import glob
 import json
 import os
 import pathlib
+import platform
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import wave
-
-import numpy as np
 
 def ffmpeg_env():
     """Окружение для ffmpeg с подстраховкой от битой libtiff.
@@ -50,7 +61,7 @@ def ffmpeg_env():
 
 ENV = ffmpeg_env()
 
-def find_model():
+def find_faster_model():
     """Ищет уже скачанную модель. Качать заново долго, а она часто есть."""
     roots = glob.glob(os.path.expanduser(
         "~/.cache/huggingface/hub/models--*faster-whisper*/snapshots/*"))
@@ -59,6 +70,78 @@ def find_model():
         if os.path.exists(os.path.join(r, "model.bin")):
             return r
     return None
+
+
+MLX_REPO = "mlx-community/whisper-large-v3-turbo"
+
+
+def find_mlx_model():
+    """Локальная папка с моделью для mlx, а если её нет — имя для скачивания."""
+    roots = (glob.glob(os.path.expanduser("~/.cache/whisper-models/mlx-*"))
+             + glob.glob(os.path.expanduser(
+                 "~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3*/snapshots/*")))
+    for r in sorted(roots, key=lambda x: "turbo" not in x):
+        if glob.glob(os.path.join(r, "weights.*")) and os.path.exists(os.path.join(r, "config.json")):
+            return r
+    return MLX_REPO
+
+
+class MlxEngine:
+    """Whisper на видеоядрах Apple. Раз в двадцать быстрее процессора."""
+    name = "mlx"
+
+    def __init__(self, model):
+        import mlx_whisper
+        self.lib = mlx_whisper
+        self.model = model or find_mlx_model()
+        if self.model == MLX_REPO:
+            print("модель скачается при первом запуске, около 1,6 ГБ", flush=True)
+
+    def run(self, path, prompt, conditioned):
+        r = self.lib.transcribe(path, path_or_hf_repo=self.model, language="ru",
+                                initial_prompt=prompt, verbose=None,
+                                condition_on_previous_text=conditioned)
+        return [{"start": float(s["start"]), "end": float(s["end"]),
+                 "text": s["text"], "words": []} for s in r["segments"]]
+
+
+class FasterEngine:
+    """Whisper на процессоре. Медленно, зато работает на любой машине."""
+    name = "faster"
+
+    def __init__(self, model):
+        self.model_path = model or find_faster_model()
+        if not self.model_path or not os.path.exists(self.model_path):
+            sys.exit("модель распознавания не найдена.\n"
+                     "Скачай Systran/faster-whisper-large-v3 или укажи папку "
+                     "через --model. Если загрузка виснет — см. references/okruzhenie.md.")
+        from faster_whisper import WhisperModel
+        self.m = WhisperModel(self.model_path, device="cpu", compute_type="int8",
+                              cpu_threads=8, local_files_only=True)
+        self.model = self.model_path
+
+    def run(self, path, prompt, conditioned):
+        kw = {} if conditioned else {"temperature": TEMPS}
+        segs, _ = self.m.transcribe(path, language="ru", word_timestamps=False,
+                                    vad_filter=False, beam_size=5,
+                                    condition_on_previous_text=conditioned,
+                                    initial_prompt=prompt, **kw)
+        return [{"start": s.start, "end": s.end, "text": s.text, "words": []}
+                for s in segs]
+
+
+def pick_engine(wanted, model):
+    """auto: mlx на маках с процессором Apple, если он установлен; иначе faster."""
+    apple = sys.platform == "darwin" and platform.machine() == "arm64"
+    if wanted in ("auto", "mlx") and (apple or wanted == "mlx"):
+        try:
+            return MlxEngine(model)
+        except ImportError:
+            if wanted == "mlx":
+                sys.exit("mlx-whisper не установлен: pip install mlx-whisper")
+            print("mlx-whisper не установлен — считаю на процессоре, это в двадцать "
+                  "раз медленнее. Поставить: pip install mlx-whisper", flush=True)
+    return FasterEngine(model)
 
 # Что Whisper выдаёт на русском вместо речи, когда срывается.
 JUNK = ["продолжение следует", "субтитры", "спасибо за просмотр",
@@ -131,15 +214,6 @@ def loudness(path, start, length):
     return -99.0
 
 
-def segments_of(result):
-    out = []
-    for s in result:
-        out.append({"start": s.start, "end": s.end, "text": s.text,
-                    "words": [{"word": w.word, "start": w.start, "end": w.end}
-                              for w in (s.words or [])]})
-    return out
-
-
 def shifted(segs, offset):
     for s in segs:
         s["start"] += offset
@@ -189,15 +263,12 @@ def main():
     ap.add_argument("--glossary",
                     help="по умолчанию ищется рядом с записью, потом в скилле")
     ap.add_argument("--model", help="папка с моделью; по умолчанию ищется сама")
+    ap.add_argument("--engine", choices=["auto", "mlx", "faster"], default="auto")
     args = ap.parse_args()
 
-    model_path = args.model or find_model()
-    if not model_path or not os.path.exists(model_path):
-        sys.exit("модель распознавания не найдена.\n"
-                 "Скачай Systran/faster-whisper-large-v3 или укажи папку "
-                 "через --model. Если загрузка виснет — см. references/okruzhenie.md.")
-
-    from faster_whisper import WhisperModel
+    os.environ.update(ENV)        # mlx сам зовёт ffmpeg, ему нужна та же подстраховка
+    engine = pick_engine(args.engine, args.model)
+    print(f"движок: {engine.name}, модель: {engine.model}", flush=True)
 
     glossary = args.glossary or find_glossary(args.audio)
     if glossary:
@@ -207,17 +278,12 @@ def main():
     if prompt:
         print(f"подсказка модели: {prompt}", flush=True)
 
-    model = WhisperModel(model_path, device="cpu", compute_type="int8",
-                         cpu_threads=8, local_files_only=True)
     total = duration(args.audio)
+    started = time.time()
 
     print(">>> основной проход", flush=True)
-    segs, _ = model.transcribe(args.audio, language="ru", word_timestamps=True,
-                               vad_filter=False, beam_size=5,
-                               condition_on_previous_text=True,
-                               initial_prompt=prompt)
-    segs = segments_of(segs)
-    print(f"    сегментов: {len(segs)}", flush=True)
+    segs = engine.run(args.audio, prompt, conditioned=True)
+    print(f"    сегментов: {len(segs)}, прошло {time.time() - started:.0f} с", flush=True)
 
     windows = find_broken(segs, args.audio, total)
     print(f">>> чиним участков: {len(windows)}", flush=True)
@@ -228,11 +294,7 @@ def main():
             subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(a),
                             "-t", str(b - a), "-i", args.audio, piece],
                            env=ENV, check=True)
-            fixed, _ = model.transcribe(piece, language="ru", word_timestamps=True,
-                                        vad_filter=False, beam_size=5,
-                                        condition_on_previous_text=False,
-                                        temperature=TEMPS)
-            fixed = shifted(segments_of(fixed), a)
+            fixed = shifted(engine.run(piece, prompt, conditioned=False), a)
             segs = [s for s in segs if not (a <= s["start"] < b)] + fixed
 
     segs.sort(key=lambda s: s["start"])
@@ -249,7 +311,10 @@ def main():
 
     json.dump({"segments": segs}, open(args.out, "w", encoding="utf-8"),
               ensure_ascii=False)
-    print(f"готово: {len(segs)} сегментов -> {args.out}")
+    took = time.time() - started
+    print(f"готово: {len(segs)} сегментов за {took:.0f} с "
+          f"(запись {total:.0f} с, в {total / took:.1f} раза быстрее реального времени) "
+          f"-> {args.out}")
 
 
 if __name__ == "__main__":
