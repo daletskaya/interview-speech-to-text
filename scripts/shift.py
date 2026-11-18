@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 """Сдвигает тайм-коды в готовой расшифровке — когда видео обрезали после неё.
 
-    shift.py РАСШИФРОВКА.md СМЕЩЕНИЕ_В_СЕКУНДАХ
+    shift.py ФАЙЛ.md [ФАЙЛ.md …] СМЕЩЕНИЕ_В_СЕКУНДАХ
+
+Файлов можно передать несколько: расшифровку, саммари, неразборчивое.
+Сдвигаются и одиночные тайм-коды [ММ:СС], и диапазоны [ММ:СС–ММ:СС;
+ММ:СС–ММ:СС] в саммари.
 
 Смещение бери из align.py, а не на глаз: разница в секунду незаметна в плеере,
 но из неё вырастает недоверие ко всему файлу. Положительное число — у видео
@@ -14,17 +18,25 @@ import sys
 
 
 def main():
-    path, offset = sys.argv[1], float(sys.argv[2])
-    text = open(path, encoding="utf-8").read()
+    if len(sys.argv) < 3:
+        sys.exit("нужно: shift.py ФАЙЛ.md [ФАЙЛ.md …] СМЕЩЕНИЕ_В_СЕКУНДАХ")
+    paths, offset = sys.argv[1:-1], float(sys.argv[-1])
+    count = [0]
 
-    def fix(m):
-        t = int(m.group(1)) * 60 + int(m.group(2)) - offset
-        t = max(0.0, t)
-        return f"[{int(t // 60):02d}:{int(t % 60):02d}]"
+    def one(m):
+        t = max(0.0, int(m.group(1)) * 60 + int(m.group(2)) - offset)
+        count[0] += 1
+        return f"{int(t // 60):02d}:{int(t % 60):02d}"
 
-    out, n = re.subn(r"\[(\d{2}):(\d{2})\]", fix, text)
-    open(path, "w", encoding="utf-8").write(out)
-    print(f"пересчитано тайм-кодов: {n}")
+    def bracket(m):                    # [12:30] или [02:11–03:23; 04:13–05:19]
+        return "[" + re.sub(r"(\d{2}):(\d{2})", one, m.group(1)) + "]"
+
+    for path in paths:
+        text = open(path, encoding="utf-8").read()
+        before = count[0]
+        out = re.sub(r"\[(\d{2}:\d{2}(?:\s*[–—;,\-]\s*\d{2}:\d{2})*)\]", bracket, text)
+        open(path, "w", encoding="utf-8").write(out)
+        print(f"{path}: пересчитано тайм-кодов: {count[0] - before}")
     print("Проверь: открой видео на любом тайм-коде из середины и сверь,")
     print("что звучит там то же, что написано.")
 
