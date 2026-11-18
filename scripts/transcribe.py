@@ -160,14 +160,22 @@ WORDS = False                    # тайм-коды слов; включает�
 
 
 def find_glossary(audio):
-    """Ищет словарь: сначала рядом с записью, потом в самом скилле.
+    """Ищет словарь: рядом с записью, потом в папках выше, потом в скилле.
 
     Так у каждого проекта может быть свой словарь, и его не нужно каждый
-    раз передавать руками — достаточно положить файл к записям.
+    раз передавать руками. Достаточно один раз положить файл в общую папку
+    со всеми интервью проекта — он найдётся для каждого разговора внутри.
+    Ближайший к записи словарь важнее дальнего. До домашней папки
+    не поднимаемся: в ней самой и выше лежат посторонние файлы, и случайный
+    glossary.md оттуда испортил бы подсказку модели.
     """
     here = pathlib.Path(audio).resolve().parent
-    skill = pathlib.Path(__file__).resolve().parent.parent
-    for folder in (here, skill):
+    home = pathlib.Path.home().resolve()
+    folders = [here]
+    if home in here.parents:
+        folders += [p for p in here.parents if home in p.parents]
+    folders.append(pathlib.Path(__file__).resolve().parent.parent)
+    for folder in folders:
         for name in ("глоссарий.md", "glossary.md"):
             candidate = folder / name
             if candidate.exists():
