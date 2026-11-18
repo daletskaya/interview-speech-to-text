@@ -24,11 +24,13 @@
 раз сбившись, модель тянет сбой дальше. На коротком куске без оглядки
 тот же участок распознаётся нормально.
 
-Тайм-коды отдельных слов не считаются: сборке диалога хватает сегментов,
-а слова стоят трети времени.
+Тайм-коды отдельных слов считаются только с ключом --words. Они нужны,
+когда говорящих размечают по голосу (voices.py): границы сегментов у Whisper
+грубые и захватывают паузы и чужие реплики, а по словам видно, где фраза
+на самом деле началась и кончилась. Для разметки по картинке хватает сегментов.
 
-Выход: JSON со списком segments (start, end, text, words). Список words
-пустой и оставлен для совместимости.
+Выход: JSON со списком segments (start, end, text, words). Без --words
+список words пустой.
 """
 import argparse
 import glob
@@ -100,9 +102,13 @@ class MlxEngine:
     def run(self, path, prompt, conditioned):
         r = self.lib.transcribe(path, path_or_hf_repo=self.model, language="ru",
                                 initial_prompt=prompt, verbose=None,
-                                condition_on_previous_text=conditioned)
+                                condition_on_previous_text=conditioned,
+                                word_timestamps=WORDS)
         return [{"start": float(s["start"]), "end": float(s["end"]),
-                 "text": s["text"], "words": []} for s in r["segments"]]
+                 "text": s["text"],
+                 "words": [{"word": w["word"], "start": float(w["start"]),
+                            "end": float(w["end"])} for w in s.get("words") or []]}
+                for s in r["segments"]]
 
 
 class FasterEngine:
@@ -122,11 +128,13 @@ class FasterEngine:
 
     def run(self, path, prompt, conditioned):
         kw = {} if conditioned else {"temperature": TEMPS}
-        segs, _ = self.m.transcribe(path, language="ru", word_timestamps=False,
+        segs, _ = self.m.transcribe(path, language="ru", word_timestamps=WORDS,
                                     vad_filter=False, beam_size=5,
                                     condition_on_previous_text=conditioned,
                                     initial_prompt=prompt, **kw)
-        return [{"start": s.start, "end": s.end, "text": s.text, "words": []}
+        return [{"start": s.start, "end": s.end, "text": s.text,
+                 "words": [{"word": w.word, "start": w.start, "end": w.end}
+                           for w in s.words or []]}
                 for s in segs]
 
 
@@ -148,6 +156,7 @@ JUNK = ["продолжение следует", "субтитры", "спаси
         "подписывайтесь", "редактор субтитров", "фонд кино"]
 
 TEMPS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+WORDS = False                    # тайм-коды слов; включается ключом --words
 
 
 def find_glossary(audio):
@@ -264,7 +273,11 @@ def main():
                     help="по умолчанию ищется рядом с записью, потом в скилле")
     ap.add_argument("--model", help="папка с моделью; по умолчанию ищется сама")
     ap.add_argument("--engine", choices=["auto", "mlx", "faster"], default="auto")
+    ap.add_argument("--words", action="store_true",
+                    help="считать тайм-коды слов — нужны для разметки по голосу")
     args = ap.parse_args()
+    global WORDS
+    WORDS = args.words
 
     os.environ.update(ENV)        # mlx сам зовёт ffmpeg, ему нужна та же подстраховка
     engine = pick_engine(args.engine, args.model)
@@ -298,6 +311,13 @@ def main():
             segs = [s for s in segs if not (a <= s["start"] < b)] + fixed
 
     segs.sort(key=lambda s: s["start"])
+
+    # В конце записи модель нередко выдаёт пачку сегментов без единого слова.
+    # В диалоге они превращаются в пустые реплики и хвост из пробелов.
+    empty = sum(1 for s in segs if not s["text"].strip())
+    if empty:
+        segs = [s for s in segs if s["text"].strip()]
+        print(f"    пустых сегментов отброшено: {empty}", flush=True)
 
     # Замены только с начала слова: иначе замена сработает внутри другого
     # слова и склеит бессмыслицу. Конец слова свободен, чтобы в словаре

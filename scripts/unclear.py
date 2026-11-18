@@ -49,6 +49,12 @@ def main():
     raw_norm = [norm(w) for w, _ in raw]
 
     text = open(args.transcript, encoding="utf-8").read()
+    # Шапка — всё до первой реплики с тайм-кодом. В ней пометку обычно
+    # объясняют («(нрзбр) — место, которое не удалось разобрать»), и считать
+    # это объяснение неразборчивым местом нельзя: в записи его нет.
+    first = re.search(r"\[\d\d:\d\d\]", text)
+    if first:
+        text = text[first.start():]
     plain = re.sub(r"\*\*|\[\d\d:\d\d\]", " ", text)
 
     found = 0
