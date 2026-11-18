@@ -1,20 +1,26 @@
 #!/usr/bin/env python
-"""Проверяет, что каждая цитата в ответах по вопросам есть в расшифровке.
+"""Проверяет, что каждая цитата в саммари есть в расшифровке.
 
-    quotes.py ОТВЕТЫ.md РАСШИФРОВКА.md [--speaker Имя]
+    quotes.py САММАРИ.md РАСШИФРОВКА.md [--speaker Имя]
 
-Цитата — строка вида
+Пункт саммари — строка списка (и её продолжение на следующих строках)
+с пересказом, цитатами в «ёлочках» и тайм-кодом или диапазоном:
 
-    - [17:40] «Отзывы смотрю, если первый раз там заказываю»
+    - Заказ к определённому времени: сначала говорит «не вижу, как это
+      сделать», потом находит значок часов. [22:07–22:46]
 
-Для каждой цитаты скрипт ищет реплику, в которую попадает тайм-код,
-и проверяет, что слова цитаты стоят в ней подряд и в том же порядке.
-Пропуск внутри цитаты обозначается многоточием: «Сначала… а потом» —
-тогда куски ищутся по очереди в той же реплике.
+Для каждой цитаты скрипт ищет реплику внутри диапазона пункта и проверяет,
+что слова цитаты стоят в ней подряд и в том же порядке. Пропуск внутри
+цитаты обозначается многоточием: «Сначала… а потом» — тогда куски ищутся
+по очереди в той же реплике.
 
 Сравниваются только слова: регистр, ё/е и знаки препинания не важны.
 Подправленное слово, склейка из двух реплик или фраза из другого места
-разговора — ошибка: цитата должна звучать ровно там, куда ведёт тайм-код.
+разговора — ошибка: цитата должна звучать там, куда ведёт тайм-код.
+
+Цитата без тайм-кода в пункте — тоже ошибка: её нельзя проверить
+по записи. Исключение — строки «Не обсуждали: …» и «Ответа по существу
+нет: …»: в них в кавычках стоит вопрос гайда, а не слова респондента.
 
 --speaker — чьи слова цитируются. Цитата из чужой реплики, например
 вопрос интервьюера, попадёт в список предупреждений.
@@ -24,7 +30,10 @@ import re
 import sys
 
 REPLY = re.compile(r"^\*\*\[(\d\d):(\d\d)\] ([^:*]+):\*\*\s*(.*)$")
-QUOTE = re.compile(r"\[(\d\d):(\d\d)\][^«\n]*«(.+?)»")
+TIME = re.compile(r"\[(\d\d):(\d\d)(?:\s*[–—-]\s*(\d\d):(\d\d))?\]")
+QUOTE = re.compile(r"«(.+?)»", re.S)
+NO_ANSWER = re.compile(r"^\s*[-*]?\s*(не обсуждали|ответа по существу нет)", re.I)
+SLACK = 3   # секунд: тайм-код реплики округлён вниз
 
 
 def words(s):
@@ -51,9 +60,31 @@ def clock(t):
     return f"{t // 60:02d}:{t % 60:02d}"
 
 
+def items(path):
+    """Пункты саммари: (номер первой строки, текст) — строка списка вместе
+    с продолжением или отдельный абзац."""
+    out, cur, start = [], [], 0
+    for n, line in enumerate(open(path, encoding="utf-8"), 1):
+        s = line.rstrip("\n")
+        # Продолжение пункта — только строка с отступом. Строка с начала
+        # («Не обсуждали: …», новый абзац) — уже отдельный пункт.
+        new_item = re.match(r"^\s{0,3}[-*] ", s) or not s.strip() or s.startswith("#") \
+            or s.startswith("```") or not s[:1].isspace()
+        if new_item and cur:
+            out.append((start, " ".join(cur)))
+            cur = []
+        if s.strip() and not s.startswith("#") and not s.startswith("```"):
+            if not cur:
+                start = n
+            cur.append(s.strip())
+    if cur:
+        out.append((start, " ".join(cur)))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("answers")
+    ap.add_argument("summary")
     ap.add_argument("transcript")
     ap.add_argument("--speaker", help="чьи слова должны быть в цитатах")
     args = ap.parse_args()
@@ -68,49 +99,59 @@ def main():
             replies[-1]["text"] += " " + line.strip()
     if not replies:
         sys.exit("в расшифровке не нашлось реплик вида **[ММ:СС] Имя:**")
-    for r in replies:
+    for i, r in enumerate(replies):
         r["words"] = words(r["text"])
+        r["end"] = replies[i + 1]["t"] if i + 1 < len(replies) else 10 ** 6
 
-    def reply_at(t):
-        cur = None
-        for r in replies:
-            if r["t"] <= t:
-                cur = r
-            else:
-                break
-        return cur
+    def in_ranges(ranges):
+        """Реплики, которые пересекаются хотя бы с одним диапазоном."""
+        return [r for r in replies
+                if any(r["t"] <= b + SLACK and r["end"] > a - SLACK for a, b in ranges)]
 
-    total, bad, foreign = 0, [], []
-    for n, line in enumerate(open(args.answers, encoding="utf-8"), 1):
-        for m in QUOTE.finditer(line):
-            total += 1
-            t = int(m[1]) * 60 + int(m[2])
-            text = m[3]
-            pieces = [words(p) for p in re.split(r"…|\.\.\.", text)]
+    total, bad, foreign, untimed = 0, [], [], []
+    for n, text in items(args.summary):
+        quotes = QUOTE.findall(text)
+        if not quotes:
+            continue
+        if NO_ANSWER.match(text):
+            continue
+        ranges = []
+        for m in TIME.finditer(text):
+            a = int(m[1]) * 60 + int(m[2])
+            b = int(m[3]) * 60 + int(m[4]) if m[3] else a
+            ranges.append((min(a, b), max(a, b)))
+        for q in quotes:
+            pieces = [words(p) for p in re.split(r"…|\.\.\.", q)]
             if not any(pieces):
                 continue
-            here = reply_at(t)
-            if here and contains(here["words"], pieces):
-                if args.speaker and here["who"] != args.speaker:
-                    foreign.append((n, t, here["who"], text))
+            total += 1
+            if not ranges:
+                untimed.append((n, q))
+                continue
+            here = [r for r in in_ranges(ranges) if contains(r["words"], pieces)]
+            if here:
+                if args.speaker and all(r["who"] != args.speaker for r in here):
+                    foreign.append((n, here[0]["t"], here[0]["who"], q))
                 continue
             elsewhere = [r for r in replies if contains(r["words"], pieces)]
+            span = ", ".join(f"{clock(a)}–{clock(b)}" for a, b in ranges)
             if elsewhere:
                 at = ", ".join(f"[{clock(r['t'])}] {r['who']}" for r in elsewhere[:3])
-                bad.append((n, t, text, f"тайм-код не тот, эти слова в реплике {at}"))
+                bad.append((n, q, f"в диапазоне {span} этих слов нет, они в реплике {at}"))
             else:
-                bad.append((n, t, text, "таких слов подряд в расшифровке нет — "
-                                        "цитата пересказана или склеена"))
+                bad.append((n, q, "таких слов подряд в расшифровке нет — "
+                                  "цитата пересказана или склеена"))
 
     print(f"цитат: {total}")
-    if not total:
-        print("Не нашлось ни одной строки вида  - [ММ:СС] «цитата».")
-    for n, t, text, why in bad:
-        print(f"\n  строка {n}, [{clock(t)}] «{text[:80]}»\n    {why}")
-    for n, t, who, text in foreign:
-        print(f"\n  строка {n}, [{clock(t)}] это слова {who}, а не {args.speaker}: «{text[:80]}»")
-    if bad or foreign:
-        print(f"\nисправь: ошибок {len(bad)}, чужих реплик {len(foreign)}")
+    for n, q, why in bad:
+        print(f"\n  строка {n}: «{q[:80]}»\n    {why}")
+    for n, q in untimed:
+        print(f"\n  строка {n}: «{q[:80]}»\n    у пункта нет тайм-кода — цитату не проверить по записи")
+    for n, t, who, q in foreign:
+        print(f"\n  строка {n}, [{clock(t)}]: это слова {who}, а не {args.speaker}: «{q[:80]}»")
+    if bad or foreign or untimed:
+        print(f"\nисправь: ошибок {len(bad)}, без тайм-кода {len(untimed)}, "
+              f"чужих реплик {len(foreign)}")
         sys.exit(1)
     print("все цитаты на месте")
 
