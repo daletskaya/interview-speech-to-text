@@ -30,7 +30,8 @@ import re
 import sys
 
 REPLY = re.compile(r"^\*\*\[(\d\d):(\d\d)\] ([^:*]+):\*\*\s*(.*)$")
-TIME = re.compile(r"\[(\d\d):(\d\d)(?:\s*[–—-]\s*(\d\d):(\d\d))?\]")
+BRACKET = re.compile(r"\[([^\]]*\d\d:\d\d[^\]]*)\]")
+TIME = re.compile(r"(\d\d):(\d\d)(?:\s*[–—-]\s*(\d\d):(\d\d))?")
 QUOTE = re.compile(r"«(.+?)»", re.S)
 NO_ANSWER = re.compile(r"^\s*[-*]?\s*(не обсуждали|ответа по существу нет)", re.I)
 SLACK = 3   # секунд: тайм-код реплики округлён вниз
@@ -116,10 +117,11 @@ def main():
         if NO_ANSWER.match(text):
             continue
         ranges = []
-        for m in TIME.finditer(text):
-            a = int(m[1]) * 60 + int(m[2])
-            b = int(m[3]) * 60 + int(m[4]) if m[3] else a
-            ranges.append((min(a, b), max(a, b)))
+        for br in BRACKET.finditer(text):        # [02:11–03:23; 04:13–05:19]
+            for m in TIME.finditer(br[1]):
+                a = int(m[1]) * 60 + int(m[2])
+                b = int(m[3]) * 60 + int(m[4]) if m[3] else a
+                ranges.append((min(a, b), max(a, b)))
         for q in quotes:
             pieces = [words(p) for p in re.split(r"…|\.\.\.", q)]
             if not any(pieces):
