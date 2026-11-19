@@ -32,11 +32,12 @@ import argparse
 import re
 import sys
 
-REPLY = re.compile(r"^\*\*\[(\d\d):(\d\d)\] ([^:*]+):\*\*\s*(.*)$")
-BRACKET = re.compile(r"\[([^\]]*\d\d:\d\d[^\]]*)\]")
-TIME = re.compile(r"(\d\d):(\d\d)(?:\s*[–—-]\s*(\d\d):(\d\d))?")
+REPLY = re.compile(r"^\*\*\[(\d{2,3}):(\d\d)\] ([^:*]+):\*\*\s*(.*)$")
+BRACKET = re.compile(r"\[([^\]]*\d\d:\d\d[^\]]*)\]")   # минут может быть и три цифры
+TIME = re.compile(r"(\d{2,3}):(\d\d)(?:\s*[–—-]\s*(\d{2,3}):(\d\d))?")
 QUOTE = re.compile(r"«(.+?)»", re.S)
-NO_ANSWER = re.compile(r"^\s*[-*]?\s*(не обсуждали|ответа по существу нет)", re.I)
+# «Не обсуждали: …» — с маркером списка, жирным или курсивом.
+NO_ANSWER = re.compile(r"^\s*[-*]?\s*[*_]*\s*(не обсуждали|ответа по существу нет)", re.I)
 SLACK = 3   # секунд: тайм-код реплики округлён вниз
 
 
@@ -67,9 +68,13 @@ def clock(t):
 def items(path):
     """Пункты саммари: (номер первой строки, текст) — строка списка вместе
     с продолжением или отдельный абзац. Раздел «Выводы ведущего» пропускается."""
-    out, cur, start, skip = [], [], 0, False
+    out, cur, start, skip, body = [], [], 0, False, False
     for n, line in enumerate(open(path, encoding="utf-8"), 1):
         s = line.rstrip("\n")
+        if s.startswith("## "):
+            body = True
+        if not body and s.lstrip().startswith("|"):
+            continue       # шапка-таблица: в ней данные о разговоре, а не цитаты
         if s.startswith("#"):
             skip = "выводы ведущего" in s.lower()
         if skip:
